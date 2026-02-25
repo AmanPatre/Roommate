@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { motion } from 'framer-motion';
+import { useAuth } from '@/lib/hooks/useAuth';
 import Navbar from '@/components/layout/Navbar';
 import { Mic, Brain, Trophy, Shield, Zap, BarChart2, ArrowRight, Star } from 'lucide-react';
 
@@ -23,6 +24,8 @@ const interviewTypes = [
 ];
 
 export default function LandingPage() {
+  const { user } = useAuth();
+
   return (
     <div>
       <Navbar />
@@ -41,12 +44,20 @@ export default function LandingPage() {
               AI interviewers that adapt to your difficulty, challenge your weaknesses, and give you a surgical debrief — every session.
             </p>
             <div style={{ display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap' }}>
-              <Link href="/sign-up" className="btn-primary" style={{ fontSize: 16, padding: '14px 32px' }}>
-                Start Practicing Free <ArrowRight size={18} />
-              </Link>
-              <Link href="/sign-in" className="btn-ghost" style={{ fontSize: 16, padding: '14px 32px' }}>
-                Sign In
-              </Link>
+              {user ? (
+                <Link href="/dashboard" className="btn-primary" style={{ fontSize: 16, padding: '14px 32px' }}>
+                  Go to Dashboard <ArrowRight size={18} />
+                </Link>
+              ) : (
+                <>
+                  <Link href="/sign-up" className="btn-primary" style={{ fontSize: 16, padding: '14px 32px' }}>
+                    Start Practicing Free <ArrowRight size={18} />
+                  </Link>
+                  <Link href="/sign-in" className="btn-ghost" style={{ fontSize: 16, padding: '14px 32px' }}>
+                    Sign In
+                  </Link>
+                </>
+              )}
             </div>
           </motion.div>
 
@@ -155,9 +166,15 @@ export default function LandingPage() {
             style={{ padding: '64px 40px', maxWidth: 640, margin: '0 auto' }}>
             <h2 style={{ color: 'var(--text)', marginBottom: 16 }}>Ready to ace your next interview?</h2>
             <p style={{ marginBottom: 32, fontSize: 16 }}>No credit card. No setup. Just speak.</p>
-            <Link href="/sign-up" className="btn-primary" style={{ fontSize: 16, padding: '14px 36px' }}>
-              Get Started Free <ArrowRight size={18} />
-            </Link>
+            {user ? (
+              <Link href="/dashboard" className="btn-primary" style={{ fontSize: 16, padding: '14px 36px' }}>
+                Continue Practicing <ArrowRight size={18} />
+              </Link>
+            ) : (
+              <Link href="/sign-up" className="btn-primary" style={{ fontSize: 16, padding: '14px 36px' }}>
+                Get Started Free <ArrowRight size={18} />
+              </Link>
+            )}
           </motion.div>
         </div>
       </section>

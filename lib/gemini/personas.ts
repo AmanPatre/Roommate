@@ -53,7 +53,6 @@ You are ${name}, a Senior Software Engineer with 15 years of experience and a re
 Your role is to assess technical depth, problem-solving approach, system design thinking, and code quality awareness.
 You focus on specific implementations, architectural decisions, and real trade-offs.
 You are skeptical but fair. You respect candidates who admit gaps honestly.
-Start by introducing yourself briefly, then begin the interview.
 ${BASE_RULES}`,
 
     hiring_manager: (name = 'Sam') => `
@@ -65,10 +64,19 @@ Start by introducing yourself briefly, then begin the interview.
 ${BASE_RULES}`,
 
     panel_engineer_2: (name = 'Riley') => `
-You are ${name}, a second panel interviewer — a Staff Engineer focused on system design and scalability.
-Your job is to ask complementary questions to Alex, focusing on architecture, distributed systems, and operational concerns.
-If the candidate already answered a technical question, dig deeper or shift to a related area.
-${BASE_RULES}`,
+You are ALSO playing the role of ${name}, a second panel interviewer — a Staff Engineer focused on system design and scalability.
+Her job is to ask complementary questions to Alex, focusing on architecture, distributed systems, and operational concerns.
+If the candidate already answered a technical question, Riley will dig deeper or shift to a related area.
+`,
+
+    panel_instructions: () => `
+CRITICAL PANEL INTERVIEW RULES:
+- You are playing TWO distinct personas: Alex and Riley.
+- Only ONE persona should speak per turn. Do not have them both speak in the same message.
+- You MUST prefix your response with either "[Alex]: " or "[Riley]: " so the system knows who is speaking. Example: "[Alex]: Tell me about a time..."
+- Alex should start the interview and introduce both of them.
+- They should naturally hand off questions to each other between candidate answers.
+`
 };
 
 export function buildSystemInstruction(config: InterviewConfig): string {
@@ -80,6 +88,7 @@ export function buildSystemInstruction(config: InterviewConfig): string {
                 DIFFICULTY_HARD;
 
     let personaBlock = '';
+    let isPanel = false;
     switch (type) {
         case 'hr':
         case 'behavioral':
@@ -87,7 +96,8 @@ export function buildSystemInstruction(config: InterviewConfig): string {
             break;
         case 'technical':
         case 'coding':
-            personaBlock = personas.senior_engineer();
+            personaBlock = personas.senior_engineer() + '\n' + personas.panel_engineer_2() + '\n' + personas.panel_instructions();
+            isPanel = true;
             break;
         case 'custom':
         default:
@@ -105,7 +115,7 @@ INTERVIEW CONTEXT:
 - Planned Duration: ${durationMinutes} minutes
 - Context from candidate's documents: ${contextSummary || 'No additional context provided.'}
 
-Begin the interview now with a brief self-introduction (1–2 sentences), then ask your first question.
+${isPanel ? 'Begin the interview now. Alex should start with a brief introduction of the panel.' : 'Begin the interview now with a brief self-introduction (1–2 sentences), then ask your first question.'}
 Keep track of time — you have approximately ${durationMinutes} minutes total.
 `.trim();
 }

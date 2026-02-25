@@ -97,6 +97,33 @@ const stateConfig: Record<ConnectionState, { color: string; label: string; icon:
     fallback: { color: 'var(--warning)', label: 'Text Mode', icon: <MessageSquare size={11} /> },
 };
 
+const parseAiResponse = (rawText: string, defaultSpeaker: string) => {
+    const regex = /\[(.*?)\]:\s*/g;
+    let match;
+    let lastIndex = 0;
+    const segments: { speaker: string, text: string }[] = [];
+    let currentSpeaker = defaultSpeaker;
+
+    const firstMatch = rawText.match(/^\[(.*?)\]:\s*/);
+    if (firstMatch) {
+        currentSpeaker = firstMatch[1];
+        lastIndex = firstMatch[0].length;
+        regex.lastIndex = lastIndex;
+    }
+
+    while ((match = regex.exec(rawText)) !== null) {
+        if (match.index > lastIndex) {
+            segments.push({ speaker: currentSpeaker, text: rawText.substring(lastIndex, match.index).trim() });
+        }
+        currentSpeaker = match[1];
+        lastIndex = regex.lastIndex;
+    }
+    if (lastIndex < rawText.length) {
+        segments.push({ speaker: currentSpeaker, text: rawText.substring(lastIndex).trim() });
+    }
+    return segments.filter(s => s.text);
+};
+
 export default function InterviewRoomPage() {
     const { sessionId } = useParams<{ sessionId: string }>();
     const { user } = useAuth();
@@ -106,6 +133,7 @@ export default function InterviewRoomPage() {
     const [connState, setConnState] = useState<ConnectionState>('idle');
     const [userSpeaking, setUserSpeaking] = useState(false);
     const [aiSpeaking, setAiSpeaking] = useState(false);
+    const [activeAiSpeaker, setActiveAiSpeaker] = useState<string | null>(null);
     const [muted, setMuted] = useState(false);
     const [handsFree, setHandsFree] = useState(true);
     const [transcript, setTranscript] = useState<TranscriptTurn[]>([]);
@@ -124,33 +152,41 @@ export default function InterviewRoomPage() {
     const MAX_RETRIES = 2;
 
     // ── Text-to-Speech ────────────────────────────────────
-    const speakText = useCallback((text: string): Promise<void> => {
+    const speakText = useCallback((text: string, speakerName?: string): Promise<void> => {
         return new Promise((resolve) => {
             if (typeof window === 'undefined' || !window.speechSynthesis) {
                 resolve();
                 return;
             }
-            // Cancel any in-progress speech before starting a new one
             window.speechSynthesis.cancel();
 
             const utterance = new SpeechSynthesisUtterance(text);
-            // Prevent Chrome garbage collection bug
             (window as any).__utterance = utterance;
-            
-            // Backup timeout in case TTS hangs
+
             const backupTimeout = setTimeout(() => {
                 resolve();
             }, text.length * 100 + 4000);
 
-            utterance.rate = 1.0;    // speaking speed  (0.5 – 2)
-            utterance.pitch = 1.0;   // voice pitch     (0 – 2)
-            utterance.volume = 1.0;  // volume          (0 – 1)
+            utterance.rate = 1.0;
+            utterance.pitch = speakerName === 'Riley' ? 1.1 : 0.95; // slightly higher for female, lower for male
+            utterance.volume = 1.0;
 
-            // Try to use a natural-sounding English voice if available
             const voices = window.speechSynthesis.getVoices();
-            const preferred = voices.find(
-                (v) => v.lang.startsWith('en') && (v.name.includes('Google') || v.name.includes('Natural') || v.name.includes('Premium'))
-            ) || voices.find((v) => v.lang.startsWith('en'));
+            let preferred: SpeechSynthesisVoice | undefined;
+
+            if (speakerName === 'Riley') {
+                // Try to find a female voice
+                preferred = voices.find(v => v.lang.startsWith('en') && (v.name.includes('Female') || v.name.includes('Samantha') || v.name.includes('Zira') || v.name.includes('Victoria')));
+            } else {
+                // Try to find a male voice
+                preferred = voices.find(v => v.lang.startsWith('en') && (v.name.includes('Male') || v.name.includes('David') || v.name.includes('Mark') || v.name.includes('Arthur')));
+            }
+
+            if (!preferred) {
+                // Fallback
+                preferred = voices.find(v => v.lang.startsWith('en') && (v.name.includes('Google') || v.name.includes('Natural') || v.name.includes('Premium'))) || voices.find((v) => v.lang.startsWith('en'));
+            }
+
             if (preferred) utterance.voice = preferred;
 
             const onFinish = () => {
@@ -159,7 +195,7 @@ export default function InterviewRoomPage() {
             };
 
             utterance.onend = onFinish;
-            utterance.onerror = onFinish; 
+            utterance.onerror = onFinish;
 
             // Slight delay prevents Chrome from skipping speech after cancel
             setTimeout(() => {
@@ -200,18 +236,27 @@ export default function InterviewRoomPage() {
 
             // Get opening message from AI
             setAiSpeaking(true);
-            loggerRef.current.startTurn('ai');
             const result = await chat.sendMessage('BEGIN_INTERVIEW');
             const aiText = result.response.text();
-            loggerRef.current.appendText(aiText);
-            loggerRef.current.commitTurn();
+
+            const defaultSpeaker = ['technical', 'coding'].includes(session.config?.type || '') ? 'Alex' : 'Sam';
+            const segments = parseAiResponse(aiText, defaultSpeaker);
+
+            for (const seg of segments) {
+                loggerRef.current.startTurn('ai');
+                loggerRef.current.appendText(`[${seg.speaker}]: ${seg.text}`);
+                loggerRef.current.commitTurn();
+            }
 
             const turns = loggerRef.current.getTurns();
             setTranscript([...turns]);
 
-            // Speak the AI greeting aloud — await so aiSpeaking stays true until done
-            await speakText(aiText);
+            for (const seg of segments) {
+                setActiveAiSpeaker(seg.speaker);
+                await speakText(seg.text, seg.speaker);
+            }
             setAiSpeaking(false);
+            setActiveAiSpeaker(null);
 
             // Start mic
             await startMic();
@@ -344,25 +389,41 @@ export default function InterviewRoomPage() {
         loggerRef.current.commitTurn();
 
         setAiSpeaking(true);
-        loggerRef.current.startTurn('ai');
         let aiText = '';
         try {
             const result = await chatRef.current.sendMessage(trimmed);
             aiText = result.response.text();
-            loggerRef.current.appendText(aiText);
+
+            const defaultSpeaker = ['technical', 'coding'].includes(session?.config?.type || '') ? 'Alex' : 'Sam';
+            const segments = parseAiResponse(aiText, defaultSpeaker);
+
+            for (const seg of segments) {
+                loggerRef.current.startTurn('ai');
+                loggerRef.current.appendText(`[${seg.speaker}]: ${seg.text}`);
+                loggerRef.current.commitTurn();
+            }
         } catch (e) {
+            loggerRef.current.startTurn('ai');
             loggerRef.current.appendText('[AI response error]');
+            loggerRef.current.commitTurn();
         }
-        loggerRef.current.commitTurn();
 
         const turns = loggerRef.current.getTurns();
         setTranscript([...turns]);
         updateTranscript(sessionId as string, turns).catch(() => { });
 
-        // Speak the AI reply — aiSpeaking stays true until TTS finishes
-        if (aiText) await speakText(aiText);
+        // Speak the AI reply
+        if (aiText) {
+            const defaultSpeaker = ['technical', 'coding'].includes(session?.config?.type || '') ? 'Alex' : 'Sam';
+            const segments = parseAiResponse(aiText, defaultSpeaker);
+            for (const seg of segments) {
+                setActiveAiSpeaker(seg.speaker);
+                await speakText(seg.text, seg.speaker);
+            }
+        }
         setAiSpeaking(false);
-    }, [sessionId, speakText]);
+        setActiveAiSpeaker(null);
+    }, [sessionId, speakText, session]);
 
     // ── End Session ────────────────────────────────────────
     const endSession = async () => {
@@ -403,7 +464,7 @@ export default function InterviewRoomPage() {
     const secondName = ['technical', 'coding'].includes(session.config?.type || '') ? 'Riley' : null;
 
     return (
-        <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ height: '100vh', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
             {/* ── Top Bar ──────────────────────────────────────── */}
             <div style={{ borderBottom: '1px solid var(--border)', background: 'rgba(8,15,11,0.9)', backdropFilter: 'blur(20px)', padding: '0 24px' }}>
                 <div style={{ maxWidth: 1100, margin: '0 auto', height: 60, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -433,8 +494,8 @@ export default function InterviewRoomPage() {
                 <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 40, gap: 40 }}>
                     {/* Avatars */}
                     <div style={{ display: 'flex', gap: 48, alignItems: 'flex-end' }}>
-                        <Avatar speaking={aiSpeaking} label={interviewerName} initials={interviewerName[0]} />
-                        {secondName && <Avatar speaking={false} label={secondName} initials={secondName[0]} />}
+                        <Avatar speaking={aiSpeaking && (!activeAiSpeaker || activeAiSpeaker === interviewerName)} label={interviewerName} initials={interviewerName[0]} />
+                        {secondName && <Avatar speaking={aiSpeaking && activeAiSpeaker === secondName} label={secondName} initials={secondName[0]} />}
                         <Avatar speaking={userSpeaking && !muted} label="You" initials={user?.displayName?.[0] || 'Y'} />
                     </div>
 
@@ -503,7 +564,13 @@ export default function InterviewRoomPage() {
                             animate={{ width: 340, opacity: 1 }}
                             exit={{ width: 0, opacity: 0 }}
                             transition={{ duration: 0.25, ease: 'easeInOut' }}
-                            style={{ borderLeft: '1px solid var(--border)', background: 'rgba(8,15,11,0.97)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}
+                            style={{
+                                borderLeft: '1px solid var(--border)',
+                                background: 'rgba(8,15,11,0.97)',
+                                display: 'flex',
+                                flexDirection: 'column',
+                                height: 'calc(100vh - 61px)' // Exactly fit remaining screen space
+                            }}
                         >
                             <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                                 <span style={{ fontFamily: 'Outfit', fontWeight: 600, fontSize: 15, color: 'var(--text)' }}>Live Transcript</span>
@@ -526,9 +593,11 @@ export default function InterviewRoomPage() {
                                         border: `1px solid ${turn.speaker === 'ai' ? 'var(--border-accent)' : 'var(--border)'}`,
                                     }}>
                                         <div style={{ fontSize: 10, fontWeight: 700, color: turn.speaker === 'ai' ? 'var(--accent)' : 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>
-                                            {turn.speaker === 'ai' ? interviewerName : 'You'}
+                                            {turn.speaker === 'ai' ? (turn.text.match(/^\[(.*?)\]:/)?.[1] || interviewerName) : 'You'}
                                         </div>
-                                        <div style={{ fontSize: 13, color: 'var(--text)', lineHeight: 1.6 }}>{turn.text}</div>
+                                        <div style={{ fontSize: 13, color: 'var(--text)', lineHeight: 1.6 }}>
+                                            {turn.speaker === 'ai' ? turn.text.replace(/^\[(.*?)\]:\s*/, '') : turn.text}
+                                        </div>
                                     </div>
                                 ))}
 
