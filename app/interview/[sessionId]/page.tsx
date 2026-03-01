@@ -149,6 +149,7 @@ export default function InterviewRoomPage() {
     const audioCtxRef = useRef<AudioContext | null>(null);
     const chatRef = useRef<any>(null);
     const retryCountRef = useRef(0);
+    const speechBufferRef = useRef(''); // accumulates ALL spoken words while mic is open (push-to-talk buffer)
     const MAX_RETRIES = 2;
 
     // ── Text-to-Speech ────────────────────────────────────
@@ -292,8 +293,99 @@ export default function InterviewRoomPage() {
     useEffect(() => { aiSpeakingRef.current = aiSpeaking; }, [aiSpeaking]);
     useEffect(() => { mutedRef.current = muted; }, [muted]);
 
+    // ── Send message (voice transcript or text fallback) ────
+    const sendUserMessage = useCallback(async (text: string) => {
+        if (!chatRef.current || !text.trim()) return;
+        if (aiSpeakingRef.current) return;
+
+        // Guard against noise: reject fragments under 3 words (e.g. "ing", "uh", "the")
+        const wordCount = text.trim().split(/\s+/).length;
+        if (wordCount < 3) return;
+
+        aiSpeakingRef.current = true;
+        setAiSpeaking(true);
+        // Stop recognition while AI is responding to prevent mic echo being captured
+        try { recognitionRef.current?.stop(); } catch (_) { }
+
+        const trimmed = text.trim();
+        loggerRef.current.startTurn('user');
+        loggerRef.current.appendText(trimmed);
+        loggerRef.current.commitTurn();
+
+        let aiText = '';
+        try {
+            const result = await chatRef.current.sendMessage(trimmed);
+            aiText = result.response.text();
+
+            const defaultSpeaker = ['technical', 'coding'].includes(session?.config?.type || '') ? 'Alex' : 'Sam';
+            const segments = parseAiResponse(aiText, defaultSpeaker);
+            for (const seg of segments) {
+                loggerRef.current.startTurn('ai');
+                loggerRef.current.appendText(`[${seg.speaker}]: ${seg.text}`);
+                loggerRef.current.commitTurn();
+            }
+        } catch (e) {
+            loggerRef.current.startTurn('ai');
+            loggerRef.current.appendText('[AI response error]');
+            loggerRef.current.commitTurn();
+        }
+
+        const turns = loggerRef.current.getTurns();
+        setTranscript([...turns]);
+        updateTranscript(sessionId as string, turns).catch(() => { });
+
+        // Speak the AI reply
+        try {
+            if (aiText) {
+                const defaultSpeaker = ['technical', 'coding'].includes(session?.config?.type || '') ? 'Alex' : 'Sam';
+                const segments = parseAiResponse(aiText, defaultSpeaker);
+                for (const seg of segments) {
+                    setActiveAiSpeaker(seg.speaker);
+                    await speakText(seg.text, seg.speaker);
+                }
+            }
+        } finally {
+            // ALWAYS reset the lock — even if speakText throws or AI errors
+            aiSpeakingRef.current = false;
+            setAiSpeaking(false);
+            setActiveAiSpeaker(null);
+            setInterimText(''); // clear any stale interim text accumulated during AI speech
+            // Resume recognition after a short pause to let speakers settle
+            setTimeout(() => {
+                if (streamRef.current?.active) {
+                    try { recognitionRef.current?.start(); } catch (_) { }
+                }
+            }, 600);
+        }
+    }, [sessionId, speakText, session]);
+
+    const handleMicToggle = useCallback(() => {
+        if (!muted) {
+            // ── MUTING: user finished speaking → flush buffer to interviewer ──
+            setMuted(true);
+            const fullAnswer = speechBufferRef.current.trim();
+            speechBufferRef.current = ''; // always clear buffer
+            setInterimText('');
+            if (fullAnswer) {
+                sendUserMessage(fullAnswer);
+            }
+        } else {
+            // ── UNMUTING: user ready to speak → clear any stale buffer and listen ──
+            speechBufferRef.current = '';
+            setInterimText('');
+            setMuted(false);
+        }
+    }, [muted, sendUserMessage]);
+
     const startMic = async () => {
         try {
+            if (recognitionRef.current) {
+                try { recognitionRef.current.stop(); } catch (e) { }
+            }
+            if (streamRef.current) {
+                streamRef.current.getTracks().forEach(t => t.stop());
+            }
+
             // ── 1. Audio analyser — drives the waveform animation ──
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
             streamRef.current = stream;
@@ -332,27 +424,28 @@ export default function InterviewRoomPage() {
             recognition.maxAlternatives = 1;
 
             recognition.onresult = (event: any) => {
-                // Ignore captured audio while the AI is still speaking (avoids echo) or explicitly muted
-                if (aiSpeakingRef.current || mutedRef.current) return;
+                // Hard stop: ignore everything while AI is speaking or mic is muted
+                if (aiSpeakingRef.current || mutedRef.current) {
+                    setInterimText('');
+                    return;
+                }
 
                 let interim = '';
-                let finalText = '';
 
                 for (let i = event.resultIndex; i < event.results.length; i++) {
                     const t = event.results[i][0].transcript;
                     if (event.results[i].isFinal) {
-                        finalText += t;
+                        // Accumulate finalized words into buffer — do NOT auto-send
+                        speechBufferRef.current += (speechBufferRef.current ? ' ' : '') + t.trim();
                     } else {
                         interim += t;
                     }
                 }
 
-                // Show real-time preview in captions
-                setInterimText(interim);
-
-                if (finalText.trim()) {
-                    setInterimText('');
-                    sendUserMessage(finalText.trim());
+                // Show live preview: buffer so far + any current interim words
+                if (!aiSpeakingRef.current) {
+                    const preview = (speechBufferRef.current + (interim ? ' ' + interim : '')).trim();
+                    setInterimText(preview);
                 }
             };
 
@@ -378,52 +471,6 @@ export default function InterviewRoomPage() {
             }
         }
     };
-
-    // ── Send message (voice transcript or text fallback) ────
-    const sendUserMessage = useCallback(async (text: string) => {
-        if (!chatRef.current || !text.trim()) return;
-        const trimmed = text.trim();
-
-        loggerRef.current.startTurn('user');
-        loggerRef.current.appendText(trimmed);
-        loggerRef.current.commitTurn();
-
-        setAiSpeaking(true);
-        let aiText = '';
-        try {
-            const result = await chatRef.current.sendMessage(trimmed);
-            aiText = result.response.text();
-
-            const defaultSpeaker = ['technical', 'coding'].includes(session?.config?.type || '') ? 'Alex' : 'Sam';
-            const segments = parseAiResponse(aiText, defaultSpeaker);
-
-            for (const seg of segments) {
-                loggerRef.current.startTurn('ai');
-                loggerRef.current.appendText(`[${seg.speaker}]: ${seg.text}`);
-                loggerRef.current.commitTurn();
-            }
-        } catch (e) {
-            loggerRef.current.startTurn('ai');
-            loggerRef.current.appendText('[AI response error]');
-            loggerRef.current.commitTurn();
-        }
-
-        const turns = loggerRef.current.getTurns();
-        setTranscript([...turns]);
-        updateTranscript(sessionId as string, turns).catch(() => { });
-
-        // Speak the AI reply
-        if (aiText) {
-            const defaultSpeaker = ['technical', 'coding'].includes(session?.config?.type || '') ? 'Alex' : 'Sam';
-            const segments = parseAiResponse(aiText, defaultSpeaker);
-            for (const seg of segments) {
-                setActiveAiSpeaker(seg.speaker);
-                await speakText(seg.text, seg.speaker);
-            }
-        }
-        setAiSpeaking(false);
-        setActiveAiSpeaker(null);
-    }, [sessionId, speakText, session]);
 
     // ── End Session ────────────────────────────────────────
     const endSession = async () => {
@@ -516,7 +563,7 @@ export default function InterviewRoomPage() {
                     {/* Controls */}
                     <div style={{ display: 'flex', gap: 12 }}>
                         <button
-                            onClick={() => setMuted(!muted)}
+                            onClick={handleMicToggle}
                             className={muted ? 'btn-danger' : 'btn-ghost'}
                             style={{ borderRadius: '50%', width: 52, height: 52, padding: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                             title={muted ? 'Unmute' : 'Mute'}
