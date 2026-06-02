@@ -222,7 +222,7 @@ export default function InterviewRoomPage() {
 
             const { GoogleGenerativeAI } = await import('@google/generative-ai');
             const genAI = new GoogleGenerativeAI(process.env.NEXT_PUBLIC_GEMINI_API_KEY || '');
-            const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+            const model = genAI.getGenerativeModel({ model: 'gemini-3.1-flash-lite' });
             const sysInstruction = buildSystemInstruction(session.config);
             const chat = model.startChat({
                 systemInstruction: { role: 'user', parts: [{ text: sysInstruction }] },
